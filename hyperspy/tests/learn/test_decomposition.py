@@ -16,8 +16,8 @@
 # You should have received a copy of the GNU General Public License
 # along with  HyperSpy.  If not, see <http://www.gnu.org/licenses/>.
 
-from os.path import join
 from tempfile import TemporaryDirectory
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -481,10 +481,10 @@ class TestLoadDecompositionResults:
         """
         with TemporaryDirectory() as tmpdir:
             self.s.decomposition()
-            fname1 = join(tmpdir, "results.npz")
+            fname1 = Path(tmpdir, "results.npz")
             self.s.learning_results.save(fname1)
             self.s.learning_results.load(fname1)
-            fname2 = join(tmpdir, "output.hspy")
+            fname2 = Path(tmpdir, "output.hspy")
             self.s.save(fname2)
             assert isinstance(self.s.learning_results.decomposition_algorithm, str)
 
@@ -662,3 +662,35 @@ def test_centering_error():
             match="centre='{}' has been deprecated".format(centre),
         ):
             s.decomposition(centre=centre)
+
+
+@pytest.mark.parametrize('mask_as_array', [True, False])
+def test_decomposition_navigation_mask(mask_as_array):
+    s = signals.Signal1D(generate_low_rank_matrix())
+    navigation_mask = (s.sum(-1) < 1.5)
+    if mask_as_array:
+        navigation_mask = navigation_mask
+    s.decomposition(navigation_mask=navigation_mask)
+
+
+@pytest.mark.parametrize('mask_as_array', [True, False])
+def test_decomposition_signal_mask(mask_as_array):
+    s = signals.Signal1D(generate_low_rank_matrix())
+    signal_mask = (s.sum(0) < 0.25)
+    if mask_as_array:
+        signal_mask = signal_mask.data
+    s.decomposition(signal_mask=signal_mask)
+
+
+@pytest.mark.parametrize('normalise_poissonian_noise', [True, False])
+def test_decomposition_mask_all_data(normalise_poissonian_noise):
+    with pytest.raises(ValueError, match='All the data are masked'):
+        s = signals.Signal1D(generate_low_rank_matrix())
+        signal_mask = (s.sum(0) >= s.sum(0).min())
+        s.decomposition(normalise_poissonian_noise, signal_mask=signal_mask)
+
+    with pytest.raises(ValueError, match='All the data are masked'):
+        s = signals.Signal1D(generate_low_rank_matrix())
+        navigation_mask = (s.sum(-1) >= 0)
+        s.decomposition(normalise_poissonian_noise,
+                        navigation_mask=navigation_mask)

@@ -24,6 +24,8 @@ import importlib
 
 import numpy as np
 from natsort import natsorted
+from inspect import isgenerator
+from pathlib import Path
 
 from hyperspy.drawing.marker import markers_metadata_dict_to_markers
 from hyperspy.misc.io.tools import ensure_directory
@@ -43,6 +45,42 @@ f_error_fmt = (
     "\tFile %d:\n"
     "\t\t%d signals\n"
     "\t\tPath: %s")
+
+
+def _infer_file_reader(extension):
+    """Return a file reader from the plugins list based on the file extension.
+
+    If the extension is not found or understood, returns
+    the Python imaging library as the file reader.
+
+    Parameters
+    ----------
+    extension : str
+        File extension, without initial "." separator
+
+    Returns
+    -------
+    reader : func
+        The inferred file reader.
+
+    """
+    rdrs = [rdr for rdr in io_plugins if extension.lower() in rdr.file_extensions]
+
+    if not rdrs:
+        # Try to load it with the python imaging library
+        _logger.warning(
+            f"Unable to infer file type from extension '{extension}'. "
+            "Will attempt to load the file with the Python imaging library."
+        )
+
+        from hyperspy.io_plugins import image
+
+        reader = image
+    else:
+        # Just take the first match for now
+        reader = rdrs[0]
+
+    return reader
 
 
 def _escape_square_brackets(text):
@@ -87,8 +125,7 @@ def load(filenames=None,
          convert_units=False,
          escape_square_brackets=False,
          **kwds):
-    """
-    Load potentially multiple supported file into an hyperspy structure.
+    """Load potentially multiple supported files into HyperSpy.
 
     Supported formats: hspy (HDF5), msa, Gatan dm3, Ripple (rpl+raw),
     Bruker bcf and spx, FEI ser and emi, SEMPER unf, EMD, EDAX spd/spc,
@@ -97,12 +134,12 @@ def load(filenames=None,
     Depending on the number of datasets to load in the file, this function will
     return a HyperSpy signal instance or list of HyperSpy signal instances.
 
-    Any extra keyword is passed to the corresponding reader. For
-    available options see their individual documentation.
+    Any extra keywords are passed to the corresponding reader. For
+    available options, see their individual documentation.
 
     Parameters
     ----------
-    filenames :  None, str or list of strings
+    filenames :  None or str or list(str) or pathlib.Path or list(pathlib.Path)
         The filename to be loaded. If None, a window will open to select
         a file to load. If a valid filename is passed in that single
         file is loaded. If multiple file names are passed in
@@ -155,8 +192,16 @@ def load(filenames=None,
         then square brackets are escaped before wildcard matching with
         ``glob.glob()``. If False, square brackets are used to represent
         character classes (e.g. ``[a-z]`` matches lowercase letters.
-    print_info: bool
-        For SEMPER unf- and EMD (Berkeley)-files, if True (default is False)
+    reader : None or str or custom file reader object, default None
+        Specify the file reader to use when loading the file(s). If None,
+        will use the file extension to infer the file type and appropriate
+        reader. If str, will select the appropriate file reader from the
+        list of available readers in HyperSpy. If a custom reader object,
+        it should implement the ``file_reader`` function, which returns
+        a dictionary containing the data and metadata for conversion to
+        a HyperSpy signal.
+    print_info: bool, default False
+        For SEMPER unf- and EMD (Berkeley)-files, if True
         additional information read during loading is printed for a quick
         overview.
     downsample : int (1–4095)
@@ -244,6 +289,10 @@ def load(filenames=None,
 
     >>> s = hs.load('file*.blo', lazy=True, stack=True)
 
+    Specify the file reader to use
+
+    >>> s = hs.load('a_nexus_file.h5', reader='nxs')
+
     """
     deprecated = ['mmap_dir', 'load_to_memory']
     warn_str = "'{}' argument is deprecated, please use 'lazy' instead"
@@ -274,120 +323,156 @@ def load(filenames=None,
         if not filenames:
             raise ValueError('No filename matches this pattern')
 
+    elif isinstance(filenames, Path):
+        # Just convert to list for now, pathlib.Path not
+        # fully supported in io_plugins
+        filenames = [f for f in [filenames] if f.is_file()]
+
+    elif isgenerator(filenames):
+        filenames = list(filenames)
+
     elif not isinstance(filenames, (list, tuple)):
         raise ValueError(
-            'The filenames parameter must be a list, tuple, string or None')
-    if not filenames:
-        raise ValueError('No file provided to reader.')
-    else:
-        if len(filenames) > 1:
-            _logger.info('Loading individual files')
-        if stack is True:
-            # We are loading a stack!
-            # Note that while each file might contain several signals, all
-            # files are required to contain the same number of signals. We
-            # therefore use the first file to determine the number of signals.
-            for i, filename in enumerate(filenames):
-                obj = load_single_file(filename, 
-                                        lazy=lazy,
-                                       **kwds)
-                if i == 0:
-                    # First iteration, determine number of signals, if several:
-                    if isinstance(obj, (list, tuple)):
-                        n = len(obj)
-                    else:
-                        n = 1
-                    # Initialize signal 2D list:
-                    signals = [[] for j in range(n)]
-                else:
-                    # Check that number of signals per file doesn't change
-                    # for other files:
-                    if isinstance(obj, (list, tuple)):
-                        if n != len(obj):
-                            raise ValueError(
-                                "The number of sub-signals per file does not "
-                                "match:\n" +
-                                (f_error_fmt % (1, n, filenames[0])) +
-                                (f_error_fmt % (i, len(obj), filename)))
-                    elif n != 1:
-                        raise ValueError(
-                            "The number of sub-signals per file does not "
-                            "match:\n" +
-                            (f_error_fmt % (1, n, filenames[0])) +
-                            (f_error_fmt % (i, len(obj), filename)))
-                # Append loaded signals to 2D list:
-                if n == 1:
-                    signals[0].append(obj)
-                elif n > 1:
-                    for j in range(n):
-                        signals[j].append(obj[j])
-            # Next, merge the signals in the `stack_axis` direction:
-            # When each file had N signals, we create N stacks!
-            objects = []
-            for i in range(n):
-                signal = signals[i]   # Sublist, with len = len(filenames)
-                signal = stack_method(
-                    signal, axis=stack_axis, new_axis_name=new_axis_name,
-                    lazy=lazy)
-                signal.metadata.General.title = os.path.split(
-                    os.path.split(os.path.abspath(filenames[0]))[0])[1]
-                _logger.info('Individual files loaded correctly')
-                _logger.info(signal._summary())
-                objects.append(signal)
-        else:
-            # No stack, so simply we load all signals in all files separately
-            objects = [load_single_file(filename, lazy=lazy,
-                                        **kwds)
-                       for filename in filenames]
+            'The filenames parameter must be a list, tuple, '
+            f'string or None, not {type(filenames)}'
+        )
 
-        if len(objects) == 1:
-            objects = objects[0]
+    if not filenames:
+        raise ValueError('No file(s) provided to reader.')
+
+    # pathlib.Path not fully supported in io_plugins,
+    # so convert to str here to maintain compatibility
+    filenames = [str(f) if isinstance(f, Path) else f for f in filenames]
+
+    if len(filenames) > 1:
+        _logger.info('Loading individual files')
+
+    if stack is True:
+        # We are loading a stack!
+        # Note that while each file might contain several signals, all
+        # files are required to contain the same number of signals. We
+        # therefore use the first file to determine the number of signals.
+        for i, filename in enumerate(filenames):
+            obj = load_single_file(filename, lazy=lazy, **kwds)
+
+            if i == 0:
+                # First iteration, determine number of signals, if several:
+                n = len(obj) if isinstance(obj, (list, tuple)) else 1
+
+                # Initialize signal 2D list:
+                signals = [[] for j in range(n)]
+            else:
+                # Check that number of signals per file doesn't change
+                # for other files:
+                if isinstance(obj, (list, tuple)):
+                    if n != len(obj):
+                        raise ValueError(
+                            "The number of sub-signals per file does not match:\n" +
+                            (f_error_fmt % (1, n, filenames[0])) +
+                            (f_error_fmt % (i, len(obj), filename))
+                        )
+                elif n != 1:
+                    raise ValueError(
+                        "The number of sub-signals per file does not match:\n" +
+                        (f_error_fmt % (1, n, filenames[0])) +
+                        (f_error_fmt % (i, len(obj), filename))
+                    )
+
+            # Append loaded signals to 2D list:
+            if n == 1:
+                signals[0].append(obj)
+            elif n > 1:
+                for j in range(n):
+                    signals[j].append(obj[j])
+
+        # Next, merge the signals in the `stack_axis` direction:
+        # When each file had N signals, we create N stacks!
+        objects = []
+        for i in range(n):
+            signal = signals[i]   # Sublist, with len = len(filenames)
+            signal = stack_method(
+                signal,
+                axis=stack_axis,
+                new_axis_name=new_axis_name,
+                lazy=lazy,
+            )
+            signal.metadata.General.title = Path(filenames[0]).parent.stem
+            _logger.info('Individual files loaded correctly')
+            _logger.info(signal._summary())
+            objects.append(signal)
+    else:
+        # No stack, so simply we load all signals in all files separately
+        objects = [load_single_file(filename, lazy=lazy, **kwds) for filename in filenames]
+
+    if len(objects) == 1:
+        objects = objects[0]
+
     return objects
 
 
 def load_single_file(filename, **kwds):
-    """
-    Load any supported file into an HyperSpy structure
+    """Load any supported file into an HyperSpy structure.
+
     Supported formats: netCDF, msa, Gatan dm3, Ripple (rpl+raw),
     Bruker bcf, FEI ser and emi, EDAX spc and spd, hspy (HDF5), and SEMPER unf.
 
     Parameters
     ----------
-
     filename : string
-        File name (including the extension)
-        
+        File name including the extension.
+    **kwds
+        Keyword arguments passed to specific file reader.
+
+    Returns
+    -------
+    object
+        Data loaded from the file.
 
     """
     if not os.path.isfile(filename):
         raise FileNotFoundError(f"File: {filename} not found!")
 
-    extension = os.path.splitext(filename)[1][1:]
-    i = 0
-    
-    while extension.lower() not in io_plugins[i].file_extensions and \
-            i < len(io_plugins) - 1:
-        i += 1
+    # File extension without "." separator
+    file_ext = os.path.splitext(filename)[1][1:]
+    reader = kwds.pop("reader", None)
 
-    if i == len(io_plugins):
-        # Try to load it with the python imaging library
-        try:
-            from hyperspy.io_plugins import image
-            reader = image
-            return load_with_reader(filename, reader, **kwds)
-        except BaseException:
-            raise IOError('If the file format is supported'
-                          ' please report this error')
+    if reader is None:
+        # Infer file reader based on extension
+        reader = _infer_file_reader(file_ext)
+    elif isinstance(reader, str):
+        # Infer file reader based on provided kwarg string
+        reader = _infer_file_reader(reader)
+    elif hasattr(reader, "file_reader"):
+        # Implies the user has passed their own file reader
+        pass
     else:
-        reader = io_plugins[i]
+        raise ValueError(
+            "`reader` should be one of None, str, "
+            "or a custom file reader object"
+        )
+
+    try:
+        # Try and load the file
         return load_with_reader(filename=filename, reader=reader, **kwds)
 
+    except BaseException as e:
+        _logger.error(
+            "If this file format is supported, please "
+            "report this error to the HyperSpy developers."
+        )
+        raise
 
-def load_with_reader(filename, reader, signal_type=None, convert_units=False,
-                     **kwds):
+
+def load_with_reader(
+        filename,
+        reader,
+        signal_type=None,
+        convert_units=False,
+        **kwds
+    ):
+    """Load a supported file with a given reader."""
     lazy = kwds.get('lazy', False)
-    file_data_list = reader.file_reader(filename,
-                                        **kwds)
+    file_data_list = reader.file_reader(filename, **kwds)
     objects = []
 
     for signal_dict in file_data_list:
@@ -410,6 +495,7 @@ def load_with_reader(filename, reader, signal_type=None, convert_units=False,
 
     if len(objects) == 1:
         objects = objects[0]
+
     return objects
 
 
@@ -584,76 +670,92 @@ def dict2signal(signal_dict, lazy=False):
 
 
 def save(filename, signal, overwrite=None, **kwds):
-    """
-    Save hyperspy signal to a file.
+    """Save hyperspy signal to a file.
 
-    A list of plugins supporting file saving can be found here: 
+    A list of plugins supporting file saving can be found here:
     http://hyperspy.org/hyperspy-doc/current/user_guide/io.html#supported-formats
 
-    Any extra keyword is passed to the corresponding save method in the
-    io_plugin. 
-    For available options see their individual documentation.
+    Any extra keywords are passed to the corresponding save method in the
+    io_plugin. For available options, see their individual documentation.
 
     Parameters
     ----------
-    filename :  None or str
-        The filename to save the signal to. 
-    signal :  Hyperspy signal
-        The signal to be saved to file     
-    overwrite : None or Bool (default, None)
-        If None and a file exists the user will be prompted to on whether to 
+    filename : None or str or pathlib.Path
+        The filename to save the signal to.
+    signal : Hyperspy signal
+        The signal to be saved to file.
+    overwrite : None or bool, default None
+        If None and a file exists the user will be prompted to on whether to
         overwrite. If False and a file exists the file will not be written.
-        If True and a file exists the file will be overwritten without 
+        If True and a file exists the file will be overwritten without
         prompting
-    
+
+    Returns
+    -------
+    None
+
     """
-    extension = os.path.splitext(filename)[1][1:]
+    filename = Path(filename).resolve()
+    extension = filename.suffix
     if extension == '':
-        extension = "hspy"
-        filename = filename + '.' + extension
+        extension = ".hspy"
+        filename = filename.with_suffix(extension)
+
     writer = None
     for plugin in io_plugins:
-        if extension.lower() in plugin.file_extensions:
+        # Drop the "." separator from the suffix
+        if extension[1:].lower() in plugin.file_extensions:
             writer = plugin
             break
 
     if writer is None:
         raise ValueError(
-            ('.%s does not correspond to any supported format. Supported ' +
-             'file extensions are: %s') %
-            (extension, strlist2enumeration(default_write_ext)))
+            f"{extension} does not correspond to any supported format. "
+            f"Supported file extensions are: {strlist2enumeration(default_write_ext)}"
+        )
+
+    # Check if the writer can write
+    sd = signal.axes_manager.signal_dimension
+    nd = signal.axes_manager.navigation_dimension
+
+    if writer.writes is False:
+        raise ValueError(
+            "Writing to this format is not supported. "
+            f"Supported file extensions are: {strlist2enumeration(default_write_ext)}"
+        )
+
+    if writer.writes is not True and (sd, nd) not in writer.writes:
+        yes_we_can = [plugin.format_name for plugin in io_plugins
+                      if plugin.writes is True or
+                      plugin.writes is not False and
+                      (sd, nd) in plugin.writes]
+
+        raise IOError(
+            "This file format does not support this data. "
+            f"Please try one of {strlist2enumeration(yes_we_can)}"
+        )
+
+    # Create the directory if it does not exist
+    ensure_directory(filename.parent)
+    is_file = filename.is_file()
+
+    if overwrite is None:
+        write = overwrite_method(filename)  # Ask what to do
+    elif overwrite is True or (overwrite is False and not is_file):
+        write = True  # Write the file
+    elif overwrite is False and is_file:
+        write = False  # Don't write the file
     else:
-        # Check if the writer can write
-        sd = signal.axes_manager.signal_dimension
-        nd = signal.axes_manager.navigation_dimension
-        if writer.writes is False:
-            raise ValueError('Writing to this format is not '
-                             'supported, supported file extensions are: %s ' %
-                             strlist2enumeration(default_write_ext))
-        if writer.writes is not True and (sd, nd) not in writer.writes:
-            yes_we_can = [plugin.format_name for plugin in io_plugins
-                          if plugin.writes is True or
-                          plugin.writes is not False and
-                          (sd, nd) in plugin.writes]
-            raise IOError('This file format cannot write this data. '
-                          'The following formats can: %s' %
-                          strlist2enumeration(yes_we_can))
-        ensure_directory(filename)
-        is_file = os.path.isfile(filename)
-        if overwrite is None:
-            write = overwrite_method(filename)  # Ask what to do
-        elif overwrite is True or (overwrite is False and not is_file):
-            write = True  # Write the file
-        elif overwrite is False and is_file:
-            write = False  # Don't write the file
-        else:
-            raise ValueError("`overwrite` parameter can only be None, True or "
-                             "False.")
-        if write:
-            writer.file_writer(filename, signal, **kwds)
-            _logger.info('The %s file was created' % filename)
-            folder, filename = os.path.split(os.path.abspath(filename))
-            signal.tmp_parameters.set_item('folder', folder)
-            signal.tmp_parameters.set_item('filename',
-                                           os.path.splitext(filename)[0])
-            signal.tmp_parameters.set_item('extension', extension)
+        raise ValueError(
+            "`overwrite` parameter can only be None, True or False."
+        )
+
+    if write:
+        # Pass as a string for now, pathlib.Path not
+        # properly supported in io_plugins
+        writer.file_writer(str(filename), signal, **kwds)
+
+        _logger.info(f'{filename} was created')
+        signal.tmp_parameters.set_item('folder', filename.parent)
+        signal.tmp_parameters.set_item('filename', filename.stem)
+        signal.tmp_parameters.set_item('extension', extension)

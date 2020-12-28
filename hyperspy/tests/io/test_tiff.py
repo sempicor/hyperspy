@@ -4,6 +4,9 @@ import tempfile
 import numpy as np
 import pytest
 import traits.api as t
+from distutils.version import LooseVersion
+import tifffile
+
 
 import hyperspy.api as hs
 from hyperspy.misc.test_utils import assert_deep_almost_equal
@@ -600,3 +603,41 @@ def test_axes_metadata():
         s.save(fname2, metadata={'axes':'ZYX'})
         s3 = hs.load(fname2)
         assert s3.axes_manager.navigation_axes[0].units == nav_unit
+
+
+def test_olympus_SIS():
+    pytest.importorskip("imagecodecs", reason="imagecodecs is required")
+    fname = os.path.join(MY_PATH2, 'olympus_SIS.tif')
+    s = hs.load(fname)
+    # This olympus SIS contains two images:
+    # - the first one is a RGB 8-bits (used for preview purposes)
+    # - the second one is the raw data
+    # only the second one is calibrated.
+    assert len(s) == 2
+    am = s[1].axes_manager
+    for axis in am._axes:
+        assert axis.units == 'm'
+        np.testing.assert_allclose(axis.scale, 2.3928e-11)
+        np.testing.assert_allclose(axis.offset, 0.0)
+
+    for ima in s:
+        assert ima.data.shape == (101, 112)
+
+    assert s[1].data.dtype is np.dtype('uint16')
+
+
+def test_save_angstrom_units():
+    s = hs.signals.Signal2D(np.arange(200*200, dtype='float32').reshape((200, 200)))
+    for axis in s.axes_manager.signal_axes:
+        axis.units = 'Å'
+        axis.scale = 0.1
+        axis.offset = 10
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        fname = os.path.join(tmpdir, 'save_angstrom_units.tif')
+        s.save(fname)
+        s2 = hs.load(fname)
+        if LooseVersion(tifffile.__version__) >= LooseVersion("2020.7.17"):
+            assert s2.axes_manager[0].units == s.axes_manager[0].units
+        assert s2.axes_manager[0].scale == s.axes_manager[0].scale
+        assert s2.axes_manager[0].offset == s.axes_manager[0].offset

@@ -16,6 +16,7 @@
 # You should have received a copy of the GNU General Public License
 # along with  HyperSpy.  If not, see <http://www.gnu.org/licenses/>.
 
+import os
 import logging
 import math
 
@@ -26,16 +27,12 @@ import scipy.interpolate
 import scipy as sp
 from scipy.signal import savgol_filter
 from scipy.ndimage.filters import gaussian_filter1d
-try:
-    from statsmodels.nonparametric.smoothers_lowess import lowess
-    statsmodels_installed = True
-except BaseException:
-    statsmodels_installed = False
 
 from hyperspy.signal import BaseSignal
 from hyperspy._signals.common_signal1d import CommonSignal1D
 from hyperspy.signal_tools import SpikesRemoval
 from hyperspy.models.model1d import Model1D
+from hyperspy.misc.lowess_smooth import lowess
 
 
 from hyperspy.defaults_parser import preferences
@@ -555,18 +552,6 @@ class Signal1D(BaseSignal, CommonSignal1D):
 
     interpolate_in_between.__doc__ %= (SHOW_PROGRESSBAR_ARG, PARALLEL_ARG, MAX_WORKERS_ARG)
 
-    def _check_navigation_mask(self, mask):
-        if mask is not None:
-            if not isinstance(mask, BaseSignal):
-                raise ValueError("mask must be a BaseSignal instance.")
-            elif mask.axes_manager.signal_dimension not in (0, 1):
-                raise ValueError("mask must be a BaseSignal "
-                                 "with signal_dimension equal to 1")
-            elif (mask.axes_manager.navigation_dimension !=
-                  self.axes_manager.navigation_dimension):
-                raise ValueError("mask must be a BaseSignal with the same "
-                                 "navigation_dimension as the current signal.")
-
     def estimate_shift1D(
         self,
         start=None,
@@ -971,17 +956,8 @@ class Signal1D(BaseSignal, CommonSignal1D):
         ------
         SignalDimensionError
             If the signal dimension is not 1.
-        ImportError
-            If statsmodels is not installed.
 
-        Notes
-        -----
-        This method uses the lowess algorithm from the `statsmodels` library,
-        which needs to be installed to use this method.
         """
-        if not statsmodels_installed:
-            raise ImportError("statsmodels is not installed. This package is "
-                              "required for this feature.")
         self._check_signal_dimension_equals_one()
         if smoothing_parameter is None or number_of_iterations is None:
             smoother = SmoothingLowess(self)
@@ -992,11 +968,9 @@ class Signal1D(BaseSignal, CommonSignal1D):
             return smoother.gui(display=display, toolkit=toolkit)
         else:
             self.map(lowess,
-                     exog=self.axes_manager[-1].axis,
-                     frac=smoothing_parameter,
-                     it=number_of_iterations,
-                     is_sorted=True,
-                     return_sorted=False,
+                     x=self.axes_manager[-1].axis,
+                     f=smoothing_parameter,
+                     n_iter=number_of_iterations,
                      show_progressbar=show_progressbar,
                      ragged=False,
                      parallel=parallel,
@@ -1505,13 +1479,29 @@ class Signal1D(BaseSignal, CommonSignal1D):
         -------
         width or [width, left, right], depending on the value of
         `return_interval`.
-        """
 
+        Notes
+        -----
+        Parallel operation of this function is not supported
+        on Windows platforms.
+
+        """
         if show_progressbar is None:
             show_progressbar = preferences.General.show_progressbar
         self._check_signal_dimension_equals_one()
         if not 0 < factor < 1:
             raise ValueError("factor must be between 0 and 1.")
+
+        if parallel != False and os.name in ["nt", "dos"]:  # pragma: no cover
+            # Due to a scipy bug where scipy.interpolate.UnivariateSpline
+            # appears to not be thread-safe on Windows, we raise a warning
+            # here. See https://github.com/hyperspy/hyperspy/issues/2320
+            # Until/if the scipy bug is fixed, we should do this.
+            _logger.warning(
+                "Parallel operation is not supported on Windows. "
+                "Setting `parallel=False`"
+            )
+            parallel = False
 
         axis = self.axes_manager.signal_axes[0]
         # x = axis.axis

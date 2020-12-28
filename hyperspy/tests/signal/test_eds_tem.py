@@ -47,7 +47,7 @@ class Test_metadata:
         sSum = s.sum(0)
         assert (
             sSum.metadata.Acquisition_instrument.TEM.Detector.EDS.live_time ==
-            3.1 * 2)
+            s.metadata.Acquisition_instrument.TEM.Detector.EDS.live_time * 2)
         # Check that metadata is unchanged
         print(old_metadata, s.metadata)      # Capture for comparison on error
         assert (old_metadata.as_dictionary() ==
@@ -59,7 +59,8 @@ class Test_metadata:
         sSum = s.sum((0, 1))
         assert (
             sSum.metadata.Acquisition_instrument.TEM.Detector.EDS.live_time ==
-            3.1 * 2 * 4)
+            s.metadata.Acquisition_instrument.TEM.Detector.EDS.live_time
+            * 2 * 4)
         # Check that metadata is unchanged
         print(old_metadata, s.metadata)      # Capture for comparison on error
         assert (old_metadata.as_dictionary() ==
@@ -74,7 +75,7 @@ class Test_metadata:
         assert r is None
         assert (
             s_resum.metadata.Acquisition_instrument.TEM.Detector.EDS.live_time ==
-            sSum.metadata.Acquisition_instrument.TEM.Detector.EDS.live_time)
+            s.metadata.Acquisition_instrument.TEM.Detector.EDS.live_time * 2)
         np.testing.assert_allclose(s_resum.data, sSum.data)
 
     def test_rebin_live_time(self):
@@ -209,9 +210,11 @@ class Test_quantification:
         intensities = s.get_lines_intensity()
         res = s.quantification(intensities, method, kfactors,
                                composition_units)
-        np.testing.assert_allclose(res[0].data, np.array([
-            [22.70779, 22.70779],
-            [22.70779, 22.70779]]), atol=1e-3)
+        s2 = s.rebin(new_shape=(1,1,1024)).squeeze().squeeze()
+        s2.quantification(intensities, method, kfactors,
+                               composition_units, plot_result=True)
+        np.testing.assert_allclose(res[0].data, np.ones((2, 2)) * 22.70779,
+            atol=1e-3)
 
     def test_quant_lorimer_warning(self):
         s = self.signal
@@ -233,9 +236,8 @@ class Test_quantification:
         intensities = s.get_lines_intensity()
         res = s.quantification(intensities, method, kfactors,
                                composition_units)
-        np.testing.assert_allclose(res[0].data, np.array([
-            [22.70779, 22.70779],
-            [22.70779, 22.70779]]), atol=1e-3)
+        np.testing.assert_allclose(res[0].data, np.ones((2, 2)) * 22.70779,
+                                   atol=1e-3)
         res2 = s.quantification(intensities, method, kfactors,
                                composition_units,
                                absorption_correction=True,
@@ -248,14 +250,11 @@ class Test_quantification:
                                composition_units,
                                absorption_correction=True,
                                thickness=0.0001)
-        np.testing.assert_allclose(res2[0][0].data, np.array([
-            [22.70779, 22.70779],
-            [22.70779, 22.70779]]), atol=1e-3)
-        np.testing.assert_allclose(res3[0][0].data, np.array([
-            [22.6957, 22.6957],
-            [22.6957, 22.6957]]), atol=1e-3)
-        np.testing.assert_allclose(res[0].data,
-                                   res4[0][0].data, atol=1e-5)
+        np.testing.assert_allclose(res2[0][0].data, np.ones((2, 2)) * 22.70779,
+                                   atol=1e-3)
+        np.testing.assert_allclose(res3[0][0].data, np.ones((2, 2)) * 22.587251,
+                                   atol=1e-3)
+        np.testing.assert_allclose(res[0].data, res4[0][0].data, atol=1e-5)
 
 
     def test_quant_zeta(self):
@@ -266,12 +265,10 @@ class Test_quantification:
         intensities = s.get_lines_intensity()
         res = s.quantification(intensities, method, factors,
                                composition_units)
-        np.testing.assert_allclose(res[1].data, np.array(
-            [[2.7125736e-03, 2.7125736e-03],
-             [2.7125736e-03, 2.7125736e-03]]), atol=1e-3)
-        np.testing.assert_allclose(res[0][1].data, np.array(
-            [[80.962287987, 80.962287987],
-             [80.962287987, 80.962287987]]), atol=1e-3)
+        np.testing.assert_allclose(res[1].data, np.ones((2, 2)) * 2.7125736e-03,
+                                   atol=1e-3)
+        np.testing.assert_allclose(res[0][1].data,
+                                   np.ones((2, 2)) * 80.962287987, atol=1e-3)
         res2 = s.quantification(intensities, method, factors,
                                composition_units,
                                absorption_correction=True,
@@ -281,9 +278,8 @@ class Test_quantification:
                                absorption_correction=True,
                                thickness=100.)
         assert res2 == res3
-        np.testing.assert_allclose(res2[0][1].data, np.array([
-            [61.6284, 61.6284],
-            [61.6284, 61.6284]]), atol=1e-3)
+        np.testing.assert_allclose(res2[0][1].data, np.ones((2, 2)) * 65.5867,
+                                   atol=1e-3)
 
     def test_quant_cross_section_units(self):
         s = self.signal.deepcopy()
@@ -360,9 +356,8 @@ class Test_quantification:
                                 method='cross_section',
                                 factors=[22.402, 21.7132])
         np.testing.assert_allclose(res[0][0].data, res2[0][0].data, atol=1e-3)
-        np.testing.assert_allclose(res[0][0].data, np.array(
-            [[36.2969, 36.2969],
-             [36.2969, 36.2969]]), atol=1e-3)
+        np.testing.assert_allclose(res[0][0].data, np.ones((2, 2)) * 36.2969,
+                                   atol=1e-3)
 
 
     def test_quant_cross_section(self):
@@ -371,15 +366,12 @@ class Test_quantification:
         factors = [3, 5]
         intensities = s.get_lines_intensity()
         res = s.quantification(intensities, method, factors)
-        np.testing.assert_allclose(res[1][0].data, np.array(
-            [[21517.1647074, 21517.1647074],
-                [21517.1647074, 21517.1647074]]), atol=1e-3)
-        np.testing.assert_allclose(res[1][1].data, np.array(
-            [[21961.616621, 21961.616621],
-             [21961.616621, 21961.616621]]), atol=1e-3)
-        np.testing.assert_allclose(res[0][0].data, np.array(
-            [[49.4889, 49.4889],
-             [49.4889, 49.4889]]), atol=1e-3)
+        np.testing.assert_allclose(res[1][0].data, np.ones((2, 2)) * 21517.1647,
+                                   atol=1e-3)
+        np.testing.assert_allclose(res[1][1].data, np.ones((2, 2)) * 21961.6166,
+                                   atol=1e-3)
+        np.testing.assert_allclose(res[0][0].data, np.ones((2, 2)) * 49.4889,
+                                   atol=1e-3)
 
 
     def test_method_error(self):
@@ -393,20 +385,17 @@ class Test_quantification:
     def test_quant_cross_section_ac(self):
         s = self.signal
         method = 'cross_section'
-        factors = [3, 5]
+        zfactors = [20, 50]
+        factors = utils_eds.zeta_to_edx_cross_section(zfactors, ['Al', 'Zn'])
         intensities = s.get_lines_intensity()
         res = s.quantification(intensities, method, factors,
+                               absorption_correction=True)
+        res2 = s.quantification(intensities, method='zeta',
+                                factors=zfactors,
                                 absorption_correction=True)
-        zfactors = utils_eds.zeta_to_edx_cross_section(factors, ['Al', 'Zn'])
-        res2 = s.quantification(intensities, method='zeta', factors=[22.402, 21.7132],
-                                absorption_correction=True)
-        np.testing.assert_allclose(res[0][0].data, np.array(
-            [[49.4889, 49.4889],
-             [49.4889, 49.4889]]), atol=1e-3)
-        np.testing.assert_allclose(res[0][0].data, np.array(
-            [[49.4889, 49.4889],
-             [49.4889, 49.4889]]), atol=1e-3)
-
+        np.testing.assert_allclose(res[0][1].data, np.ones((2, 2)) * 44.02534,
+                                   atol=1e-3)
+        np.testing.assert_allclose(res2[0][0].data, res[0][0].data, atol=1e-3)
 
     def test_quant_zeros(self):
         intens = np.array([[0.5, 0.5, 0.5],
@@ -449,9 +438,26 @@ class Test_quantification:
                                composition_units='weight')
         assert res[0].metadata.Sample.xray_lines[0] == 'Zn_Ka'
         assert res[1].metadata.Sample.xray_lines[0] == 'Al_Ka'
-        np.testing.assert_allclose(res[1].data, np.array([
-            [22.70779, 22.70779],
-            [22.70779, 22.70779]]), atol=1e-3)
+        np.testing.assert_allclose(res[1].data, np.ones((2, 2)) * 22.70779,
+                                   atol=1e-3)
+
+    def test_CL_get_mass_thickness(self):
+        s = self.signal
+        method = 'CL'
+        kfactors = [1, 2.0009344042484134]
+        composition_units = 'weight'
+        intensities = s.get_lines_intensity()
+        res = s.quantification(intensities, method, kfactors,
+                               composition_units)
+
+        mass_thickness = s.CL_get_mass_thickness(res, 100.)[0, 0]
+        np.testing.assert_allclose(mass_thickness, 6.1317741E-4)
+
+        thickness = np.array([[100., 90.0],
+                              [85, 80.]])
+        mass_thickness2 = s.CL_get_mass_thickness(res, thickness)
+        np.testing.assert_allclose(mass_thickness2,
+                                   mass_thickness * thickness / 100)
 
 
 @lazifyTestClass
@@ -466,6 +472,18 @@ class Test_vacum_mask:
         s = self.signal
         assert s.vacuum_mask().data[0]
         assert not s.vacuum_mask().data[-1]
+
+
+@pytest.mark.parametrize('normalise_poissonian_noise', [True, False])
+def test_decomposition(normalise_poissonian_noise):
+    s = EDSTEMSpectrum(np.ones(shape=(32, 32, 1024)))
+    s.add_poissonian_noise()
+    # default uses `vacuum_mask`
+    s.decomposition(normalise_poissonian_noise)
+
+    # test with numpy array mask
+    mask = s.vacuum_mask().data
+    s.decomposition(normalise_poissonian_noise, navigation_mask=mask)
 
 
 @lazifyTestClass

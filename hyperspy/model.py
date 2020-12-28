@@ -43,8 +43,7 @@ from scipy.optimize import (
 from hyperspy.component import Component
 from hyperspy.defaults_parser import preferences
 from hyperspy.docstrings.model import FIT_PARAMETERS_ARG
-from hyperspy.docstrings.signal import (MAX_WORKERS_ARG, PARALLEL_ARG,
-                                        SHOW_PROGRESSBAR_ARG)
+from hyperspy.docstrings.signal import SHOW_PROGRESSBAR_ARG
 from hyperspy.events import Event, Events, EventSuppressor
 from hyperspy.exceptions import VisibleDeprecationWarning
 from hyperspy.extensions import ALL_EXTENSIONS
@@ -405,9 +404,9 @@ class BaseModel(list):
         thing.model = self
         setattr(self.components, slugify(name_string,
                                          valid_variable_name=True), thing)
-        if self._plot_active is True:
+        if self._plot_active:
             self._connect_parameters2update_plot(components=[thing])
-        self.update_plot()
+            self.signal._plot.signal_plot.update()
 
     def extend(self, iterable):
         for object in iterable:
@@ -454,12 +453,13 @@ class BaseModel(list):
             list.remove(self, athing)
             athing.model = None
         if self._plot_active:
-            self.update_plot()
+            self.signal._plot.signal_plot.update()
 
     def as_signal(self, component_list=None, out_of_range_to_nan=True,
-                  show_progressbar=None, out=None, parallel=None, max_workers=None):
+                  show_progressbar=None, out=None, **kwargs):
         """Returns a recreation of the dataset using the model.
-        The spectral range that is not fitted is filled with nans.
+
+        By default, the signal range outside of the fitted range is filled with nans.
 
         Parameters
         ----------
@@ -468,15 +468,13 @@ class BaseModel(list):
             list is used in making the returned spectrum. The components can
             be specified by name, index or themselves.
         out_of_range_to_nan : bool
-            If True the spectral range that is not fitted is filled with nans.
-            Default True.
+            If True the signal range outside of the fitted range is filled with
+            nans. Default True.
         %s
         out : {None, BaseSignal}
             The signal where to put the result into. Convenient for parallel
             processing. If None (default), creates a new one. If passed, it is
             assumed to be of correct shape and dtype and not checked.
-        %s
-        %s
 
         Returns
         -------
@@ -496,17 +494,12 @@ class BaseModel(list):
         """
         if show_progressbar is None:
             show_progressbar = preferences.General.show_progressbar
-        if parallel is None:
-            parallel = preferences.General.parallel
 
-        if not isinstance(parallel, bool):
+        for k in [k for k in ["parallel", "max_workers"] if k in kwargs]:
             warnings.warn(
-                "Passing integer arguments to 'parallel' has been deprecated and will be removed "
-                f"in HyperSpy 2.0. Please use 'parallel=True, max_workers={parallel}' instead.",
+                f"`{k}` argument has been deprecated and will be removed in HyperSpy 2.0",
                 VisibleDeprecationWarning,
             )
-            max_workers = parallel
-            parallel = True
 
         if out is None:
             data = np.empty(self.signal.data.shape, dtype='float')
@@ -521,73 +514,32 @@ class BaseModel(list):
             signal = out
             data = signal.data
 
-        if out_of_range_to_nan is True:
+        if not out_of_range_to_nan:
+            # we want the full signal range, including outside the fitted
+            # range, we need to set all the channel_switches to True
             channel_switches_backup = copy.copy(self.channel_switches)
             self.channel_switches[:] = True
 
-        # We set this value to equal cpu_count, with a maximum
-        # of 32 cores, since the earlier default value was inappropriate
-        # for many-core machines.
-        if max_workers is None:
-            max_workers = min(32, os.cpu_count())
+        self._as_signal_iter(
+            component_list=component_list,
+            show_progressbar=show_progressbar,
+            data=data
+        )
 
-        # Avoid any overhead of additional threads
-        if max_workers < 2:
-            parallel = False
-
-        if not parallel:
-            self._as_signal_iter(component_list=component_list,
-                                 show_progressbar=show_progressbar, data=data)
-        else:
-            am = self.axes_manager
-            nav_shape = am.navigation_shape
-            if len(nav_shape):
-                ind = np.argmax(nav_shape)
-                size = nav_shape[ind]
-            if not len(nav_shape) or size < 4:
-                # no or not enough navigation, just run without threads
-                return self.as_signal(component_list=component_list,
-                                      show_progressbar=show_progressbar,
-                                      out=signal, parallel=False)
-            max_workers = min(max_workers, size / 2)
-            splits = [len(sp) for sp in np.array_split(np.arange(size),
-                                                       max_workers)]
-            models = []
-            data_slices = []
-            slices = [slice(None), ] * len(nav_shape)
-            for sp, csm in zip(splits, np.cumsum(splits)):
-                slices[ind] = slice(csm - sp, csm)
-                models.append(self.inav[tuple(slices)])
-                array_slices = self.signal._get_array_slices(tuple(slices),
-                                                             True)
-                data_slices.append(data[array_slices])
-
-            from concurrent.futures import ThreadPoolExecutor
-            with ThreadPoolExecutor(max_workers=max_workers) as exe:
-                _map = exe.map(
-                    lambda thing: thing[0]._as_signal_iter(
-                        data=thing[1],
-                        component_list=component_list,
-                        show_progressbar=thing[2] + 1 if show_progressbar else False),
-                    zip(models, data_slices, range(int(max_workers))))
-
-            _ = next(_map)
-
-        if out_of_range_to_nan is True:
+        if not out_of_range_to_nan:
+            # Restore the channel_switches, previously set
             self.channel_switches[:] = channel_switches_backup
 
         return signal
 
-    as_signal.__doc__ %= (SHOW_PROGRESSBAR_ARG, PARALLEL_ARG, MAX_WORKERS_ARG)
+    as_signal.__doc__ %= SHOW_PROGRESSBAR_ARG
 
-    def _as_signal_iter(self, component_list=None, show_progressbar=None,
-                        data=None):
+    def _as_signal_iter(self, data, component_list=None,
+                        show_progressbar=None):
         # Note that show_progressbar can be an int to determine the progressbar
         # position for a thread-friendly bars. Otherwise race conditions are
         # ugly...
-        if data is None:
-            raise ValueError('No data supplied')
-        if show_progressbar is None:
+        if show_progressbar is None:  # pragma: no cover
             show_progressbar = preferences.General.show_progressbar
 
         with stash_active_state(self if component_list else []):
@@ -639,7 +591,7 @@ class BaseModel(list):
                 parameter.events.value_changed.disconnect(
                     self._model_line._auto_update_line)
 
-    def update_plot(self, *args, **kwargs):
+    def update_plot(self, render_figure=False, update_ylimits=False, **kwargs):
         """Update model plot.
 
         The updating can be suspended using `suspend_update`.
@@ -652,10 +604,12 @@ class BaseModel(list):
         if self._plot_active is True and self._suspend_update is False:
             try:
                 if self._model_line is not None:
-                    self._model_line.update()
-                for component in [component for component in self if
-                                  component.active is True]:
-                    self._update_component_line(component)
+                    self._model_line.update(render_figure=render_figure,
+                                            update_ylimits=update_ylimits)
+                if self._plot_components:
+                    for component in [component for component in self if
+                                      component.active is True]:
+                        self._update_component_line(component)
             except BaseException:
                 self._disconnect_parameters2update_plot(components=self)
 
@@ -674,11 +628,14 @@ class BaseModel(list):
             f = self._model_line._auto_update_line
             for c in self:
                 es.add(c.events, f)
+                if c._position:
+                    es.add(c._position.events)
                 for p in c.parameters:
                     es.add(p.events, f)
+
         for c in self:
-            if hasattr(c, '_model_plot_line'):
-                f = c._model_plot_line._auto_update_line
+            if hasattr(c, '_component_line'):
+                f = c._component_line._auto_update_line
                 es.add(c.events, f)
                 for p in c.parameters:
                     es.add(p.events, f)
@@ -690,7 +647,12 @@ class BaseModel(list):
         self._suspend_update = old
 
         if update_on_resume is True:
-            self.update_plot()
+            for c in self:
+                position = c._position
+                if position:
+                    position.events.value_changed.trigger(
+                        obj=position, value=position.value)
+            self.update_plot(render_figure=True, update_ylimits=False)
 
     def _close_plot(self):
         if self._plot_components is True:
@@ -698,57 +660,20 @@ class BaseModel(list):
         self._disconnect_parameters2update_plot(components=self)
         self._model_line = None
 
-    @staticmethod
-    def _connect_component_line(component):
-        if hasattr(component, "_model_plot_line"):
-            f = component._model_plot_line._auto_update_line
-            component.events.active_changed.connect(f, [])
-            for parameter in component.parameters:
-                parameter.events.value_changed.connect(f, [])
-
-    @staticmethod
-    def _disconnect_component_line(component):
-        if hasattr(component, "_model_plot_line"):
-            f = component._model_plot_line._auto_update_line
-            component.events.active_changed.disconnect(f)
-            for parameter in component.parameters:
-                parameter.events.value_changed.disconnect(f)
-
-    def _connect_component_lines(self):
-        for component in self:
-            if component.active:
-                self._connect_component_line(component)
-
-    def _disconnect_component_lines(self):
-        for component in self:
-            if component.active:
-                self._disconnect_component_line(component)
-
-    @staticmethod
-    def _update_component_line(component):
-        if hasattr(component, "_model_plot_line"):
-            component._model_plot_line.update()
-
-    def _disable_plot_component(self, component):
-        self._disconnect_component_line(component)
-        if hasattr(component, "_model_plot_line"):
-            component._model_plot_line.close()
-            del component._model_plot_line
-        self._plot_components = False
-
     def enable_plot_components(self):
         if self._plot is None or self._plot_components:
             return
-        self._plot_components = True
         for component in [component for component in self if
                           component.active]:
             self._plot_component(component)
+        self._plot_components = True
 
     def disable_plot_components(self):
         if self._plot is None:
             return
-        for component in self:
-            self._disable_plot_component(component)
+        if self._plot_components:
+            for component in self:
+                self._disable_plot_component(component)
         self._plot_components = False
 
     def _set_p0(self):
@@ -891,7 +816,7 @@ class BaseModel(list):
             if component.active:
                 component.store_current_parameters_in_map()
 
-    def fetch_stored_values(self, only_fixed=False):
+    def fetch_stored_values(self, only_fixed=False, update_on_resume=True):
         """Fetch the value of the parameters that has been previously stored.
 
         Parameters
@@ -899,15 +824,24 @@ class BaseModel(list):
         only_fixed : bool, optional
             If True, only the fixed parameters are fetched.
 
+        update_on_resume : bool, optional
+            If True, update the model plot after values are updated.
+
         See Also
         --------
         store_current_values
 
         """
         cm = self.suspend_update if self._plot_active else dummy_context_manager
-        with cm(update_on_resume=True):
+        with cm(update_on_resume=update_on_resume):
             for component in self:
                 component.fetch_stored_values(only_fixed=only_fixed)
+
+    def _on_navigating(self):
+        """Same as fetch_stored_values but without update_on_resume since
+        the model plot is updated in the figure update callback.
+        """
+        self.fetch_stored_values(only_fixed=False, update_on_resume=False)
 
     def fetch_values_from_array(self, array, array_std=None):
         """Fetch the parameter values from the given array, optionally also
@@ -1307,13 +1241,12 @@ class BaseModel(list):
                 # differentiation, but for consistency across all three
                 # we enforce estimation below, and raise an error here.
                 raise ValueError(
-                    f"`optimizer='{optimizer}'` does not support `grad=None`. "
-                    f"Please use `grad='auto'` instead."
+                    f"`optimizer='{optimizer}'` does not support `grad=None`."
                 )
         else:
             raise ValueError(
-                "`grad` must be one of ['auto', 'analytical', "
-                f"callable, None], not '{grad}'"
+                "`grad` must be one of ['analytical', callable, None], not "
+                f"'{grad}'."
             )
 
         with cm(update_on_resume=True):
@@ -1688,6 +1621,9 @@ class BaseModel(list):
 
                             if autosave and i % autosave_every == 0:
                                 self.save_parameters2file(autosave_fn)
+            # Trigger the indices_changed event to update to current indices,
+            # since the callback was suppressed
+            self.axes_manager.events.indices_changed.trigger(self.axes_manager)
 
         if autosave is True:
             _logger.info(f"Deleting temporary file: {autosave_fn}.npz")

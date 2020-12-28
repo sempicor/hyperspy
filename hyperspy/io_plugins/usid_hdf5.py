@@ -6,6 +6,7 @@ from collections.abc import MutableMapping
 import h5py
 import numpy as np
 import pyUSID as usid
+import sidpy
 
 _logger = logging.getLogger(__name__)
 
@@ -76,7 +77,7 @@ def _get_dim_dict(labels, units, val_func, ignore_non_linear_dims=True):
             continue
         else:
             try:
-                step_size = usid.write_utils.get_slope(dim_vals)
+                step_size = sidpy.base.num_utils.get_slope(dim_vals)
             except ValueError:
                 # Non-linear dimension! - see notes above
                 if ignore_non_linear_dims:
@@ -270,11 +271,11 @@ def _usidataset_to_signal(h5_main, ignore_non_linear_dims=True, lazy=True,
     h5_chan_grp = h5_main.parent
     if isinstance(h5_chan_grp, h5py.Group):
         if 'Channel' in h5_chan_grp.name.split('/')[-1]:
-            group_attrs = usid.hdf_utils.get_attributes(h5_chan_grp)
+            group_attrs = sidpy.hdf_utils.get_attributes(h5_chan_grp)
             h5_meas_grp = h5_main.parent
             if isinstance(h5_meas_grp, h5py.Group):
                 if 'Measurement' in h5_meas_grp.name.split('/')[-1]:
-                    temp = usid.hdf_utils.get_attributes(h5_meas_grp)
+                    temp = sidpy.hdf_utils.get_attributes(h5_meas_grp)
                     group_attrs.update(temp)
 
     """
@@ -287,7 +288,7 @@ def _usidataset_to_signal(h5_main, ignore_non_linear_dims=True, lazy=True,
     spec_dim_list = _assemble_dim_list(spec_dict, dim_labs[num_pos_dims:])
     dim_list = pos_dim_list + spec_dim_list
 
-    _, is_complex, is_compound, _, _ = usid.dtype_utils.check_dtype(h5_main)
+    _, is_complex, is_compound, _, _ = sidpy.hdf.dtype_utils.check_dtype(h5_main)
 
     trunc_func = partial(_convert_to_signal_dict,
                          dim_dict_list=dim_list,
@@ -355,8 +356,7 @@ def _axes_list_to_dimensions(axes_list, data_shape, is_spec):
     # for dim_ind, (dim_size, dim) in enumerate(zip(data_shape, axes_list)):
     # we are going by data_shape for order (slowest to fastest)
     # so the order in axes_list does not matter
-    for dim_ind in range(len(data_shape)):
-        dim_size = data_shape[len(data_shape) - 1 - dim_ind]
+    for dim_ind, dim in enumerate(axes_list):
         dim = axes_list[dim_ind]
         dim_name = dim_type + '_Dim_' + str(dim_ind)
         if isinstance(dim.name, str):
@@ -370,11 +370,9 @@ def _axes_list_to_dimensions(axes_list, data_shape, is_spec):
                 dim_units = temp
                 # use REAL dimension size rather than what is presented in the
                 # axes manager
-        dim_list.append(usid.Dimension(dim_name, dim_units,
-                                       np.arange(dim.offset,
-                                                 dim.offset + dim_size *
-                                                 dim.scale,
-                                                 dim.scale)))
+        dim_size = data_shape[len(data_shape) - 1 - dim_ind]
+        ar = np.arange(dim_size) * dim.scale + dim.offset
+        dim_list.append(usid.Dimension(dim_name, dim_units, ar))
     if len(dim_list) == 0:
         return usid.Dimension('Arb', 'a. u.', 1)
     return dim_list[::-1]
@@ -383,7 +381,7 @@ def _axes_list_to_dimensions(axes_list, data_shape, is_spec):
 
 
 def file_reader(filename, dataset_path=None, ignore_non_linear_dims=True,
-                **kwds):
+                lazy=False, **kwds):
     """
     Reads a USID Main dataset present in an HDF5 file into a HyperSpy Signal
 
@@ -415,14 +413,8 @@ def file_reader(filename, dataset_path=None, ignore_non_linear_dims=True,
 
     # Need to keep h5 file handle open indefinitely if lazy
     # Using "with" will cause the file to be closed
-    # with h5py.File(filename, mode='r') as h5_f:
-    h5_f = h5py.File(filename, mode='r')
+    h5_f = h5py.File(filename, 'r')
     if dataset_path is None:
-        """
-        if not kwds.get('lazy', True):
-            warn('In order to safely load multiple large datasets to memory, '
-                 'please consider setting the kwarg lazy=True')
-        """
         all_main_dsets = usid.hdf_utils.get_all_main(h5_f)
         signals = []
         for h5_dset in all_main_dsets:
@@ -430,7 +422,8 @@ def file_reader(filename, dataset_path=None, ignore_non_linear_dims=True,
             # Should not append
             signals += _usidataset_to_signal(h5_dset,
                                              ignore_non_linear_dims=
-                                             ignore_non_linear_dims, **kwds)
+                                             ignore_non_linear_dims,
+                                             lazy=lazy, **kwds)
         return signals
     else:
         if not isinstance(dataset_path, str):
@@ -438,10 +431,11 @@ def file_reader(filename, dataset_path=None, ignore_non_linear_dims=True,
         h5_dset = h5_f[dataset_path]
         return _usidataset_to_signal(h5_dset,
                                      ignore_non_linear_dims=
-                                     ignore_non_linear_dims, **kwds)
+                                     ignore_non_linear_dims,
+                                     lazy=lazy, **kwds)
 
     # At least close the file handle if not lazy load
-    if not kwds.get('lazy', True):
+    if not lazy:
         h5_f.close()
 
 
@@ -504,6 +498,8 @@ def file_writer(filename, object2save, **kwds):
     phy_quant = 'Unknown Quantity'
     phy_units = 'Unknown Units'
     dset_name = 'Raw_Data'
+
+
 
     if not append:
         tran = usid.NumpyTranslator()
