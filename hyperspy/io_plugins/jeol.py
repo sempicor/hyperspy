@@ -288,7 +288,7 @@ def read_pts(filename, scale=None, rebin_energy=1, SI_dtype=np.uint8,
         ]
 
         data = np.zeros([height, width, channel_number], dtype=SI_dtype)
-        data = readcube(rawdata, data, rebin_energy, channel_number,
+        data, realtime, livetime = readcube(rawdata, data, rebin_energy, channel_number,
                         width_norm, height_norm)
 
         hv = meas_data_header["MeasCond"]["AccKV"]
@@ -424,7 +424,13 @@ def parsejeol(fd):
 def readcube(rawdata, hypermap, rebin_energy, channel_number,
              width_norm, height_norm):  # pragma: no cover
     for value in rawdata:
-        if value >= 32768 and value < 36864:
+        realtime = 0
+        livetime = 0
+        if value == 24576:
+            realtime += 0.01
+        elif value == 28672:
+            livetime += 0.01
+        elif value >= 32768 and value < 36864:
             x = int((value - 32768) / width_norm)
         elif value >= 36864 and value < 40960:
             y = int((value - 36864) / height_norm)
@@ -432,7 +438,7 @@ def readcube(rawdata, hypermap, rebin_energy, channel_number,
             z = int((value - 45056) / rebin_energy)
             if z < channel_number:
                 hypermap[y, x, z] += 1
-    return hypermap
+    return hypermap, realtime, livetime
 
 
 def read_eds(filename, **kwargs):
